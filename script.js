@@ -22,7 +22,9 @@ var SPRITES = {
   sprayActive: "images/spray.png",             
   title:       "images/titel.png",          
   startBtn:    "images/start.png",           
-  gameover:    "images/gameover.png",         
+  gameover:    "images/gameover.png",
+
+  lightning:   "images/lightning.png",
 
   pixelFontCSS:"'Press Start 2P','VT323',monospace"
 };
@@ -97,7 +99,11 @@ var TITLE_H = 500;
 var myBackground;
 var mugList = [];
 var score = 0;
+
+// Highscore & popup-gedrag
 var highScore = Number(localStorage.getItem("mug_highscore") || 0);
+var highScoreStartOfRun = highScore;  // baseline bij start van potje
+var hsPopupShownThisRun = false;      // popup maar 1x per nieuwe highscore
 var highScoreJustSet = false, highScoreFlashUntil = 0;
 
 var spawnTimer = null, spawnInterval = initialSpawnInterval;
@@ -106,20 +112,23 @@ var hasSpray = false, spraying = false;
 var sprayRadius = 70;                     
 var sprayDurationMs = 10000, sprayEndTime = null, nextSprayAt = 60;
 
-// --- CHARGE & STUN (nieuw) ---
+// --- CHARGE & STUN ---
 var charge = 0;                 // 0..200  (100 = geel, 200 = paars)
 var CHARGE_PER_HIT = 12;        // charge per succesvolle boss-hit
 var CHARGE_STAGE1 = 100;        // drempel geel
 var CHARGE_STAGE2 = 200;        // drempel paars (max)
 
-var bossStunnedUntil = 0;       // timestamp tot wanneer stun duurt
-var chargedStrikeReady = false; // na paars: volgende hit extra effect
-var chargedStrikeExpireAt = 0;  // timeout voor charged strike (ms)
+// Stun / charged strike
+var bossStunnedUntil = 0;       
+var chargedStrikeReady = false; // na paars: volgende hit = big damage + flash
+var chargedStrikeExpireAt = 0;  
 
-// --- QTE timing (nieuw) ---
-var bossAttackStartAt = 0;      // voor "snel kiezen" bonus
+// Lightning overlay (gele stun)
+var lightningImg = SPRITES.lightning ? img(SPRITES.lightning) : null;
+var lightningOverlayUntil = 0;
 
-// SFX(to add later)
+// --- QTE timing ---
+var bossAttackStartAt = 0;
 
 // FX
 var shakeUntil = 0;
@@ -222,10 +231,24 @@ window.startGame = startGame;
 
 function startNewGame() {
   mugList = []; score = 0;
+
+  // Reset spray
   hasSpray=false; spraying=false; sprayEndTime=null; nextSprayAt=60;
+
+  // Reset boss
   endBossFight(true); boss=null; bossPhase=0; boss1Defeated=false; boss2Defeated=false;
   playerHP = PLAYER_MAX_HP;
 
+  // Reset charge/stun
+  charge = 0; bossStunnedUntil = 0; chargedStrikeReady = false; chargedStrikeExpireAt = 0; lightningOverlayUntil = 0;
+
+  // Highscore popup-gedrag resetten per potje
+  highScoreStartOfRun = Number(localStorage.getItem("mug_highscore") || 0);
+  hsPopupShownThisRun = false;
+  highScoreJustSet = false; highScoreFlashUntil = 0;
+  highScore = highScoreStartOfRun; // sync lokale weergave met opgeslagen waarde
+
+  // Spawns
   spawnInterval = initialSpawnInterval;
   stopSpawnerOnly(); scheduleSpawn();
   spawnMug();
@@ -298,13 +321,14 @@ function onClick(e) {
         // Charge opbouwen
         charge = Math.min(CHARGE_STAGE2, charge + CHARGE_PER_HIT);
 
-        // Charged strike bonus als actief
+        // Charged strike bonus als actief (PAARS): geen stun, wel big damage + purple flash
         if (chargedStrikeReady && Date.now() <= chargedStrikeExpireAt){
-          const extra = 15; // extra bonusdamage op de 'charged strike' hit
+          const extra = 18; // zware extra damage
           bossHP -= extra;
-          addDamageText(x, y-24, "-" + extra, "#9b5cf6");   // paars getint
-          beginShake(SHAKE_MAG*1.8, SHAKE_DURATION_MS*1.6); // zwaardere shake
-          showBigText("CHARGED STRIKE!", "#b388ff", 800);
+          flashZap("#b388ff"); // grote paarse flits op HIT
+          addDamageText(x, y-24, "-" + extra, "#9b5cf6");
+          beginShake(SHAKE_MAG*2.0, SHAKE_DURATION_MS*1.8);
+          showBigText("CHARGED STRIKE!", "#b388ff", 900);
           chargedStrikeReady = false;
         }
 
@@ -388,8 +412,9 @@ function stopSpawnerOnly(){ if (spawnTimer) clearTimeout(spawnTimer); spawnTimer
 
 function setGameOver(reason){
   gameOverReason = reason || "Game Over!";
+  // Bij game over: highscore updaten (zonder popup)
   if (score > highScore){
-    highScore = score; highScoreJustSet = true; highScoreFlashUntil = Date.now()+2000;
+    highScore = score;
     try{ localStorage.setItem("mug_highscore", String(highScore)); }catch(e){}
   }
   hasSpray=false; spraying=false;
@@ -461,7 +486,7 @@ function maybeStartBossAttack(){
   if (bossAttackActive || gameState!=="boss") return;
   if (Date.now() >= bossAttackNextAt){
     bossAttackActive = true;
-    bossAttackStartAt = Date.now();                        // starttijd registreren
+    bossAttackStartAt = Date.now();                        
     bossAttackEndAt  = bossAttackStartAt + ATTACK_DECISION_MS;
     buildChoiceRects();
     if (boss) boss.setPose("attack");
@@ -480,16 +505,15 @@ function buildChoiceRects(){
 }
 function resolveDefenseChoice(key){
   const now = Date.now();
-  const reaction = now - (bossAttackStartAt || now);   // hoe snel je koos
+  const reaction = now - (bossAttackStartAt || now);   
   const quickFrac = Math.max(0, Math.min(1, (ATTACK_DECISION_MS - reaction) / ATTACK_DECISION_MS));
-  const QUICK_BONUS_MAX = 0.35;                        // tot +35% kans bij bliksemsnel kiezen
+  const QUICK_BONUS_MAX = 0.35;                        
   const bonus = quickFrac * QUICK_BONUS_MAX;
 
-  // basis kansen per type
   let base;
-  if (key === "block")   base = 0.60;   // veiligst
+  if (key === "block")   base = 0.60;   
   else if (key === "dodge") base = 0.45;
-  else /* counter */      base = 0.30;  // riskantst, hoogste reward
+  else /* counter */      base = 0.30;  
 
   const success = Math.random() < (base + bonus);
 
@@ -497,7 +521,6 @@ function resolveDefenseChoice(key){
 
   if (success){
     if (key === "counter") {
-      // 20 damage bij counter
       bossHP -= 20;
       beginShake(SHAKE_MAG*1.2, SHAKE_DURATION_MS*1.1);
       addDamageText(boss.x + boss.width/2, boss.y + 20, "-20", "#fffb8b");
@@ -537,7 +560,7 @@ function drawDamageTexts(){
   for (let i=damageTexts.length-1;i>=0;i--){
     const d=damageTexts[i];
     if (now>=d.dieAt){ damageTexts.splice(i,1); continue; }
-    const t=1-(d.dieAt-now)/DAMAGE_TEXT_MS; // 0..1
+    const t=1-(d.dieAt-now)/DAMAGE_TEXT_MS; 
     ctx.save();
     ctx.globalAlpha = 1-t;
     setPixelFont(ctx, 24);
@@ -591,14 +614,19 @@ function drawBigCenterText(){
   ctx.restore();
 }
 
-// Hearts LINKS verticaal tijdens boss
+// Hearts HORIZONTAAL, gecentreerd BOVEN de QTE-buttons
 function drawHearts(){
   if (gameState!=="boss") return;
   const ctx=myGameArea.context;
-  const x = 16;           // links marge
-  const pad = 8;          // verticale tussenruimte
+
+  const pad = 8;
+  const totalW = playerHP * HEART_SIZE + Math.max(0, (playerHP-1)) * pad;
+  const startX = Math.max(16, Math.floor((myGameArea.canvas.width - totalW)/2));
+  // QTE-buttons beginnen op y = canvas.height - 160, dus hartjes daar net boven
+  const y = (myGameArea.canvas.height - 160) - HEART_SIZE - 12;
+
   for (let i=0;i<playerHP;i++){
-    const y = 16 + i*(HEART_SIZE + pad);
+    const x = startX + i*(HEART_SIZE+pad);
     if (heartImg && heartImg.complete && heartImg.naturalWidth) drawImageCrisp(ctx, heartImg, x, y, HEART_SIZE, HEART_SIZE);
     else { ctx.fillStyle="#ff4d4f"; ctx.fillRect(snap(x),snap(y),HEART_SIZE,HEART_SIZE); ctx.strokeStyle="#000"; ctx.strokeRect(snap(x),snap(y),HEART_SIZE,HEART_SIZE); }
   }
@@ -609,7 +637,23 @@ function playerLoseHP(n){
   if (playerHP<=0){ setGameOver("Geen levens meer!"); }
 }
 
-// Highscore popup
+// Lightning overlay boven de boss tijdens gele stun
+function drawLightningOverlay(){
+  if (!lightningImg || !lightningImg.complete || !lightningImg.naturalWidth) return;
+  if (Date.now() >= lightningOverlayUntil) return;
+  const ctx = myGameArea.context;
+
+  const overlayW = Math.floor(boss.width * 0.9);
+  const overlayH = Math.floor(boss.height * 0.9);
+  const x = Math.floor(boss.x + (boss.width - overlayW)/2);
+  const y = Math.floor(boss.y - overlayH*0.15); // iets bovenop de boss
+  ctx.save();
+  ctx.globalAlpha = 0.85;
+  drawImageCrisp(ctx, lightningImg, x, y, overlayW, overlayH);
+  ctx.restore();
+}
+
+// Highscore popup: wordt getekend zolang 'flash'-timer loopt
 function drawHighScorePopup(){
   if (!highScoreJustSet || Date.now() >= highScoreFlashUntil) return;
   const ctx = myGameArea.context, w = 360, h = 160;
@@ -687,12 +731,13 @@ function updateGameArea(){
       if (boss.x<=0){ boss.x=0; bossDir=1; }
       if (boss.x+boss.width>=myGameArea.canvas.width){ boss.x=myGameArea.canvas.width-boss.width; bossDir=-1; }
     }
-    // update sprite/pose altijd exact één keer
+    // update sprite/pose
     boss.update();
 
     drawBossUI(); 
     drawHearts(); 
     drawChargeBar();
+    drawLightningOverlay(); // overlay voor gele stun
 
     if (aliveCount()>=CURRENT_BOSS_ALIVE_CAP){ ctx.restore(); setGameOver("Te veel minions!"); return; }
 
@@ -708,7 +753,6 @@ function updateGameArea(){
     if (Date.now() >= bossStunnedUntil) {
       maybeStartBossAttack();
     } else {
-      // als gestunned, geen nieuwe QTE starten
       bossAttackActive = false;
       bossChoiceRects = [];
     }
@@ -743,7 +787,7 @@ function drawMenu(){
   ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(0,0,myGameArea.canvas.width,myGameArea.canvas.height);
 
   // logo + startknop
-  const titleX = (1280 - TITLE_W) / 2; // gefixt voor 1280 canvas
+  const titleX = (1280 - TITLE_W) / 2;
   const titleY = 240;
 
   if (titleImg && titleImg.complete && titleImg.naturalWidth) drawImageCrisp(ctx, titleImg, titleX, titleY, TITLE_W, TITLE_H);
@@ -781,19 +825,23 @@ function drawScore(compact){
   const ctx=myGameArea.context;
   const y = compact ? 110 : 40;
 
-  // label sprite linksboven
+  // Nettere schaal van score-label + grotere cijfers
   if (scoreLabelImg && scoreLabelImg.complete && scoreLabelImg.naturalWidth){
-    drawImageCrisp(ctx, scoreLabelImg, 16, y - SCORE_LABEL_H + 6, SCORE_LABEL_W, SCORE_LABEL_H);
-    const px = Math.floor(SCORE_LABEL_H * 0.82); // hoogte ~ labelhoogte
+    const labelW = Math.floor(SCORE_LABEL_W * 0.92);
+    const labelH = Math.floor(SCORE_LABEL_H * 0.92);
+    drawImageCrisp(ctx, scoreLabelImg, 16, y - labelH + 8, labelW, labelH);
+
+    // Maak de cijfers groter en verticaal beter uitgelijnd
+    const px = Math.floor(labelH * 1.15);
     setPixelFont(ctx, px);
     ctx.fillStyle = "#fff";
-    ctx.fillText(String(score), snap(16 + SCORE_LABEL_W + 14), snap(y + Math.floor(SCORE_LABEL_H * 0.30)));
+    ctx.fillText(String(score), snap(16 + labelW + 18), snap(y + Math.floor(labelH * 0.34)));
   } else {
-    setPixelFont(ctx, 24);
+    setPixelFont(ctx, 28);
     ctx.fillStyle = "#fff";
     ctx.fillText("SCORE", 20, y);
-    setPixelFont(ctx, 32);
-    ctx.fillText(String(score), 20, y+36);
+    setPixelFont(ctx, 40);
+    ctx.fillText(String(score), 20, y+40);
   }
 
   if (gameState==="playing"){
@@ -813,7 +861,6 @@ function drawScore(compact){
 
 function drawBossUI(){
   const ctx=myGameArea.context, pad=20, barW=1280-pad*2, barH=24, x=pad, y=20;
-  // BG
   ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(snap(x),snap(y),snap(barW),snap(barH));
   const maxHP = (bossPhase===1?BOSS1_MAX_HP:BOSS2_MAX_HP);
   const pct = Math.max(0, bossHP/maxHP);
@@ -852,11 +899,21 @@ function drawDefenseChoices(){
 function addScore(n){
   score += (n||0);
   checkAutoSpray();
-  // highscore popup
-  if (score > highScore){
+
+  // Popup slechts 1x per nieuwe highscore (ten opzichte van waarde bij start potje)
+  const stored = highScoreStartOfRun;
+  if (!hsPopupShownThisRun && score > stored){
     highScore = score;
-    highScoreJustSet = true; highScoreFlashUntil = Date.now()+1200;
+    highScoreJustSet = true; 
+    highScoreFlashUntil = Date.now() + 1200;
+    hsPopupShownThisRun = true;
     try{ localStorage.setItem("mug_highscore", String(highScore)); }catch(e){}
+  } else {
+    // Na de eerste keer: highscore stillen updaten zonder popup
+    if (score > highScore){
+      highScore = score;
+      try{ localStorage.setItem("mug_highscore", String(highScore)); }catch(e){}
+    }
   }
 }
 
@@ -880,25 +937,25 @@ function img(src){ const im=new Image(); im.src=src; return im; }
 
 function tryUseCharge(){
   if (charge >= CHARGE_STAGE2){
-    // PAARS: Overcharge -> stun + buff voor volgende hit
+    // PAARS: GEEN STUN. Activeer charged strike voor de volgende hit.
     charge -= CHARGE_STAGE2;
-    bossStunnedUntil = Date.now() + 2600;
     chargedStrikeReady = true;
-    chargedStrikeExpireAt = Date.now() + 5000; // moet binnen 5s benut worden
-    beginShake(SHAKE_MAG*2.2, SHAKE_DURATION_MS*2.0);
-    flashZap("#b388ff"); // paars effect
-    showBigText("OVERCHARGE!", "#b388ff", 900);
+    chargedStrikeExpireAt = Date.now() + 6000; // iets ruimer
+    beginShake(SHAKE_MAG*1.6, SHAKE_DURATION_MS*1.6);
+    showBigText("OVERCHARGE READY!", "#b388ff", 900);
+    // geen bossStunnedUntil hier!
   } else if (charge >= CHARGE_STAGE1){
-    // GEEL: elektrische shock -> stun
+    // GEEL: elektrische shock -> stun + lightning overlay
     charge -= CHARGE_STAGE1;
     bossStunnedUntil = Date.now() + 1500;
+    lightningOverlayUntil = Date.now() + 900; // kort flash-venster
     beginShake(SHAKE_MAG*1.4, SHAKE_DURATION_MS*1.6);
-    flashZap("#ffe066"); // geel effect
+    flashZap("#ffe066"); 
     showBigText("ELECTRIC SHOCK!", "#ffd60a", 800);
   }
 }
 
-// Klein visueel flitsje als feedback
+// Visuele flits
 function flashZap(color){
   const ctx = myGameArea.context;
   ctx.save();
@@ -916,30 +973,25 @@ function drawChargeBar(){
   const w = 420, h = 18;
   const x = pad, y = myGameArea.canvas.height - h - pad;
 
-  // achtergrond
   ctx.fillStyle = "rgba(0,0,0,0.55)";
   ctx.fillRect(snap(x),snap(y),snap(w),snap(h));
   ctx.strokeStyle = "#ffffff";
   ctx.lineWidth = 2;
   ctx.strokeRect(snap(x),snap(y),snap(w),snap(h));
 
-  // segment 0..100 (geel) en 100..200 (paars)
   const c = Math.max(0, Math.min(CHARGE_STAGE2, charge));
-  const p1 = Math.min(c, CHARGE_STAGE1) / CHARGE_STAGE1;  // 0..1
+  const p1 = Math.min(c, CHARGE_STAGE1) / CHARGE_STAGE1;  
   const p2 = c > CHARGE_STAGE1 ? (c - CHARGE_STAGE1) / (CHARGE_STAGE2 - CHARGE_STAGE1) : 0;
 
-  // eerste segment (geel)
   if (p1 > 0){
     ctx.fillStyle = "#ffd60a";
     ctx.fillRect(snap(x), snap(y), snap(Math.floor(w * 0.5 * p1)), snap(h));
   }
-  // tweede segment (paars)
   if (p2 > 0){
     ctx.fillStyle = "#b388ff";
     ctx.fillRect(snap(x + Math.floor(w*0.5)), snap(y), snap(Math.floor(w * 0.5 * p2)), snap(h));
   }
 
-  // label
   setPixelFont(ctx, 14);
   ctx.fillStyle = "#ffffff";
   let label = "CHARGE";
@@ -985,7 +1037,7 @@ function BossComponent(width,height,src,x,y){
                                    : (SPRITES.boss2Attack ? img(SPRITES.boss2Attack) : null));
 
   this.canBeHit = function(){
-    // spawn protection
+    //spawn protection
     return !this.spawn || this.spawn.done;
   };
 
@@ -1067,7 +1119,6 @@ function drawSprayAura(){
   const r = sprayRadius;
   const x = cursorPos.x, y = cursorPos.y;
 
-  // zachte radial gradient
   const g = ctx.createRadialGradient(x, y, 0, x, y, r);
   g.addColorStop(0, "rgba(255, 230, 0, 0.30)");
   g.addColorStop(1, "rgba(255, 230, 0, 0.00)");
