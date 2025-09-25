@@ -26,7 +26,7 @@ var SPRITES = {
 
   lightning:   "images/lightning.png",
 
-  pixelFontCSS:"'Press Start 2P','VT323',monospace"
+  pixelFontCSS:"'ARCADECLASSIC','Press Start 2P','VT323',monospace"
 };
 
 /* ----------------- TUNING ----------------- */
@@ -90,7 +90,7 @@ var SHAKE_MAG          = 8;
 var DAMAGE_TEXT_MS     = 700;
 
 var SCORE_LABEL_W = 210;
-var SCORE_LABEL_H = 58;
+var SCORE_LABEL_H = 100
 
 var TITLE_W = 1000;
 var TITLE_H = 500;
@@ -99,6 +99,8 @@ var TITLE_H = 500;
 var myBackground;
 var mugList = [];
 var score = 0;
+
+var lastScorePx = 40; 
 
 // Highscore & popup-gedrag
 var highScore = Number(localStorage.getItem("mug_highscore") || 0);
@@ -623,7 +625,7 @@ function drawHearts(){
   const totalW = playerHP * HEART_SIZE + Math.max(0, (playerHP-1)) * pad;
   const startX = Math.max(16, Math.floor((myGameArea.canvas.width - totalW)/2));
   // QTE-buttons beginnen op y = canvas.height - 160, dus hartjes daar net boven
-  const y = (myGameArea.canvas.height - 160) - HEART_SIZE - 12;
+  const y = (myGameArea.canvas.height - 165) - HEART_SIZE - 12;
 
   for (let i=0;i<playerHP;i++){
     const x = startX + i*(HEART_SIZE+pad);
@@ -665,7 +667,7 @@ function drawHighScorePopup(){
     ctx.fillStyle = "#ffd60a";
     ctx.fillRect(snap(x), snap(y), snap(w), snap(h));
     ctx.strokeStyle = "#000";
-    ctx.lineWidth = 3;
+    ctx.lineWidth = 6;
     ctx.strokeRect(snap(x), snap(y), snap(w), snap(h));
     ctx.fillStyle = "#000";
     setPixelFont(ctx, 36);
@@ -787,8 +789,8 @@ function drawMenu(){
   ctx.fillStyle="rgba(0,0,0,0.35)"; ctx.fillRect(0,0,myGameArea.canvas.width,myGameArea.canvas.height);
 
   // logo + startknop
-  const titleX = (1280 - TITLE_W) / 2;
-  const titleY = 240;
+  const titleX = Math.floor((myGameArea.canvas.width - TITLE_W) / 2); // perfect center X
+  const titleY = 240; // laat zo / of verander voor hoger/lager
 
   if (titleImg && titleImg.complete && titleImg.naturalWidth) drawImageCrisp(ctx, titleImg, titleX, titleY, TITLE_W, TITLE_H);
   else { ctx.fillStyle="#fff"; setPixelFont(ctx, 64); ctx.fillText("Muggen Game", snap(centerX(ctx,"Muggen Game",64)), snap(titleY + 140)); }
@@ -825,36 +827,43 @@ function drawScore(compact){
   const ctx=myGameArea.context;
   const y = compact ? 110 : 40;
 
-  // Nettere schaal van score-label + grotere cijfers
+  // --- nette schaal + label iets lager zetten zonder het cijfer te verplaatsen ---
   if (scoreLabelImg && scoreLabelImg.complete && scoreLabelImg.naturalWidth){
     const labelW = Math.floor(SCORE_LABEL_W * 0.92);
     const labelH = Math.floor(SCORE_LABEL_H * 0.92);
-    drawImageCrisp(ctx, scoreLabelImg, 16, y - labelH + 8, labelW, labelH);
 
-    // Maak de cijfers groter en verticaal beter uitgelijnd
-    const px = Math.floor(labelH * 1.15);
-    setPixelFont(ctx, px);
-    ctx.fillStyle = "#fff";
-    ctx.fillText(String(score), snap(16 + labelW + 18), snap(y + Math.floor(labelH * 0.34)));
+    // Hoeveel lager wil je het label? Pas deze offset gerust aan:
+    const LABEL_Y_OFFSET = 30; // <— hoger getal = label lager
+    const labelY = (y - labelH + 30) + LABEL_Y_OFFSET;
+    drawImageCrisp(ctx, scoreLabelImg, 8, labelY, labelW, labelH);
+
+    // Score-cijfers: vaste plek (veranderen we NIET)
+    const scoreNumX = 16 + labelW + 18;
+    const scoreNumY = y + 36; // zelfde positie als voorheen / zet desnoods bij
+    const px = Math.floor(labelH * 0.60);  // iets kleiner dan eerst
+    lastScorePx = px;
+    drawTextWithOutline(ctx, String(score), snap(scoreNumX), snap(scoreNumY), px, "#FDB000");
+
   } else {
     setPixelFont(ctx, 28);
     ctx.fillStyle = "#fff";
     ctx.fillText("SCORE", 20, y);
-    setPixelFont(ctx, 40);
+    lastScorePx = 40;                  // fallback voor de rest
+    setPixelFont(ctx, lastScorePx);
     ctx.fillText(String(score), 20, y+40);
   }
 
+  // --- SPRAY-regel: zelfde grootte als score-cijfers ---
   if (gameState==="playing"){
-    setPixelFont(ctx, 16);
+    setPixelFont(ctx, 50);    // <— NU GROOT
     if (hasSpray){
       const msLeft=Math.max(0,(sprayEndTime||0)-Date.now());
       const sLeft=Math.ceil(msLeft/1000);
       ctx.fillStyle="yellow";
-      ctx.fillText("SPRAY " + sLeft + "s", 20, y + SCORE_LABEL_H + 8);
+      ctx.fillText("SPRAY " + sLeft + "s", 20, y + (SCORE_LABEL_H) + 20);
     } else {
       const need=Math.max(0, nextSprayAt-score);
-      ctx.fillStyle="white";
-      ctx.fillText("SPRAY @ "+nextSprayAt+"  ("+need+")", 20, y + SCORE_LABEL_H + 8);
+      drawTextWithOutline(ctx, "Volgende spray: " + need, 20, y + SCORE_LABEL_H + 24, 22, "#fff")
     }
   }
 }
@@ -1000,6 +1009,18 @@ function drawChargeBar(){
   ctx.fillText(label, snap(x), snap(y - 6));
 }
 
+function drawTextWithOutline(ctx, text, x, y, fontPx, fillColor="#fff", strokeColor="#000") {
+  setPixelFont(ctx, fontPx);
+  ctx.lineJoin = "miter";  
+  ctx.miterLimit = 2;
+  ctx.lineWidth = 4;             // dikte van de rand
+  ctx.strokeStyle = strokeColor; // randkleur
+  ctx.strokeText(text, x, y);
+  ctx.fillStyle = fillColor;     // vulkleur
+  ctx.fillText(text, x, y);
+}
+
+drawTextWithOutline(ctx, String(score), snap(scoreNumX), snap(scoreNumY), px, "#FDB000", "#000", 10);
 /* ----------------- COMPONENTS ----------------- */
 function component(width, height, src, x, y, type){
   this.width=width; this.height=height; this.x=x; this.y=y; this.speedX=0; this.speedY=0; this.type=type;
